@@ -1,0 +1,166 @@
+# .github/workflows/build-apk.yml
+# Builds a signed Android APK on every push to main.
+# The APK is uploaded as a downloadable artifact.
+#
+# SETUP (one-time):
+#   1. Generate a keystore:
+#        keytool -genkey -v -keystore my-release-key.keystore \
+#                -alias my-key-alias -keyalg RSA -keysize 2048 -validity 10000
+#   2. Base64 encode it:
+#        base64 -i my-release-key.keystore | tr -d '\n'
+#   3. Add these GitHub Secrets (Settings → Secrets → Actions):
+#        ANDROID_KEYSTORE_BASE64   ← output of step 2
+#        ANDROID_KEY_ALIAS         ← "my-key-alias"
+#        ANDROID_KEY_PASSWORD      ← your key password
+#        ANDROID_STORE_PASSWORD    ← your keystore password
+#        EXPO_TOKEN                ← from expo.dev account (optional, for EAS)
+
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:        # Allow manual trigger from GitHub UI
+
+concurrency:
+  group: build-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Node.js ───────────────────────────────────────────────────────────
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      # ── Java (Android requires JDK 17) ────────────────────────────────────
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      # ── Android SDK ───────────────────────────────────────────────────────
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # ── Install dependencies ──────────────────────────────────────────────
+      - name: Install npm dependencies
+        run: npm ci
+
+      # ── Expo prebuild (generates android/ directory) ──────────────────────
+      - name: Expo prebuild
+        run: npx expo prebuild --platform android --clean
+        env:
+          EXPO_NO_DOTENV: 1
+
+      # ── Restore keystore from secret ──────────────────────────────────────
+      - name: Decode keystore
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/release.keystore
+          echo "KEYSTORE_EXISTS=true" >> $GITHUB_ENV
+
+      # ── Configure signing ─────────────────────────────────────────────────
+      - name: Configure signing
+        if: ${{ env.KEYSTORE_EXISTS == 'true' }}
+        run: |
+          cat >> android/gradle.properties << EOF
+          MYAPP_RELEASE_STORE_FILE=release.keystore
+          MYAPP_RELEASE_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}
+          MYAPP_RELEASE_STORE_PASSWORD=${{ secrets.ANDROID_STORE_PASSWORD }}
+          MYAPP_RELEASE_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}
+          EOF
+
+      - name: Set up release signing in build.gradle
+        if: ${{ env.KEYSTORE_EXISTS == 'true' }}
+        run: |
+          sed -i 's/signingConfigs {/signingConfigs {\n        release {\n            storeFile file(MYAPP_RELEASE_STORE_FILE)\n            storePassword MYAPP_RELEASE_STORE_PASSWORD\n            keyAlias MYAPP_RELEASE_KEY_ALIAS\n            keyPassword MYAPP_RELEASE_KEY_PASSWORD\n        }/' android/app/build.gradle
+          sed -i 's/buildTypes {/buildTypes {\n        release {\n            signingConfig signingConfigs.release\n        }/' android/app/build.gradle
+
+      # ── Make Gradle wrapper executable ────────────────────────────────────
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      # ── Cache Gradle ──────────────────────────────────────────────────────
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('android/**/*.gradle*', 'android/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
+      # ── Build ─────────────────────────────────────────────────────────────
+      - name: Build release APK
+        run: |
+          cd android
+          ./gradlew assembleRelease --no-daemon --stacktrace
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx4g"
+
+      # ── Fallback: build debug APK if release fails ─────────────────────
+      - name: Build debug APK (fallback)
+        if: failure()
+        run: |
+          cd android
+          ./gradlew assembleDebug --no-daemon
+
+      # ── Find APK ──────────────────────────────────────────────────────────
+      - name: Find built APK
+        id: find_apk
+        run: |
+          APK=$(find android -name "*.apk" | head -1)
+          echo "apk_path=$APK" >> $GITHUB_OUTPUT
+          echo "Found APK: $APK"
+          ls -lh "$APK"
+
+      # ── Rename APK with version + timestamp ───────────────────────────────
+      - name: Rename APK
+        run: |
+          VERSION=$(node -e "console.log(require('./package.json').version)")
+          TIMESTAMP=$(date +%Y%m%d-%H%M)
+          NEW_NAME="ai-assistant-v${VERSION}-${TIMESTAMP}.apk"
+          cp "${{ steps.find_apk.outputs.apk_path }}" "$NEW_NAME"
+          echo "APK_NAME=$NEW_NAME" >> $GITHUB_ENV
+
+      # ── Upload APK as artifact (downloadable from Actions tab) ────────────
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI-Assistant-APK
+          path: ${{ env.APK_NAME }}
+          retention-days: 30
+
+      # ── Create GitHub Release on tagged pushes ────────────────────────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ env.APK_NAME }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Summary ───────────────────────────────────────────────────────────
+      - name: Build summary
+        run: |
+          echo "## ✅ Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**APK:** \`${{ env.APK_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Download from the **Artifacts** section above ⬆️" >> $GITHUB_STEP_SUMMARY
