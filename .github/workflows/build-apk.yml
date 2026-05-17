@@ -135,7 +135,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      # ── 🆕 Create build directory FIRST (before any logging) ──────────────
+      # ── Create build directory FIRST (before any logging) ─────────────────
       - name: Create build artifacts directory
         run: mkdir -p build-artifacts
 
@@ -221,15 +221,6 @@ jobs:
         run: |
           cd android
           ./gradlew assembleDebug --no-daemon --build-cache 2>&1 | tee ../build-artifacts/gradle-debug-build.log
-
-      # ── 🆕 Upload build logs on failure ───────────────────────────────────
-      - name: Upload build logs (on failure)
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-logs-${{ github.run_number }}
-          path: build-artifacts/*.log
-          retention-days: 7
 
       # ── Find APK ──────────────────────────────────────────────────────────
       - name: Find built APK
@@ -405,6 +396,15 @@ jobs:
             sed -i '/MYAPP_RELEASE/d' android/gradle.properties
           fi
           echo "🧹 Cleaned up sensitive files"
+
+      # ── 🆕 Upload build logs at the END (always runs) ─────────────────────
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.run_number }}
+          path: build-artifacts/*.log
+          retention-days: 7
 
   # ── Job 4: APK Size Analysis (runs after build) ───────────────────────────
   size-analysis:
