@@ -137,7 +137,8 @@ jobs:
 
       # ── Install dependencies ──────────────────────────────────────────────
       - name: Install npm dependencies
-        run: npm ci
+        run: npm ci 2>&1 | tee build-artifacts/npm-install.log || true
+        # 🆕 Logs npm install output
 
       # ── Validate keystore secret ──────────────────────────────────────────
       - name: Validate keystore secret
@@ -153,7 +154,9 @@ jobs:
 
       # ── Expo prebuild (generates android/ directory) ──────────────────────
       - name: Expo prebuild
-        run: npx expo prebuild --platform android --clean
+        run: |
+          npx expo prebuild --platform android --clean 2>&1 | tee build-artifacts/expo-prebuild.log
+        # 🆕 Logs Expo prebuild output
         env:
           EXPO_NO_DOTENV: 1
 
@@ -210,7 +213,8 @@ jobs:
         id: build_release
         run: |
           cd android
-          ./gradlew assembleRelease --no-daemon --stacktrace --build-cache
+          ./gradlew assembleRelease --no-daemon --stacktrace --build-cache 2>&1 | tee ../build-artifacts/gradle-build.log
+          # 🆕 Logs Gradle build output to build-artifacts/gradle-build.log
         env:
           GRADLE_OPTS: "-Dorg.gradle.daemon=false -Xmx${{ env.GRADLE_MAX_MEMORY }}"
 
@@ -220,7 +224,18 @@ jobs:
         if: failure() && steps.build_release.outcome == 'failure'
         run: |
           cd android
-          ./gradlew assembleDebug --no-daemon --build-cache
+          ./gradlew assembleDebug --no-daemon --build-cache 2>&1 | tee ../build-artifacts/gradle-debug-build.log
+          # 🆕 Logs debug build output
+
+      # ── 🆕 Upload build logs on failure ───────────────────────────────────
+      - name: Upload build logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.run_number }}
+          path: |
+            build-artifacts/*.log
+          retention-days: 7
 
       # ── Find APK ──────────────────────────────────────────────────────────
       - name: Find built APK
@@ -332,31 +347,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # ── Notify on failure ─────────────────────────────────────────────────
-      - name: Notify on build failure
-        if: failure()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const issueBody = `
-            ## ❌ APK Build Failed
-            
-            **Workflow:** ${context.workflow}
-            **Run:** [${context.runId}](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})
-            **Branch:** ${context.ref}
-            **Commit:** ${context.sha}
-            
-            Please check the [workflow logs](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.
-            `;
-            
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: '❌ APK Build Failed',
-              body: issueBody,
-              labels: ['build-failure', 'automated']
-            });
-
       # ── Summary ───────────────────────────────────────────────────────────
       - name: Build summary
         if: always()
@@ -375,6 +365,9 @@ jobs:
             echo "## ❌ Build Failed" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Check the logs above for error details." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 📋 Build Logs" >> $GITHUB_STEP_SUMMARY
+            echo "Download the **build-logs** artifact for detailed error information." >> $GITHUB_STEP_SUMMARY
           fi
 
       # ── Cleanup sensitive files ───────────────────────────────────────────
